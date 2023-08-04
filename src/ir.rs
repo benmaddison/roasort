@@ -1,8 +1,18 @@
-use std::{cmp::Ordering, fmt, str::FromStr};
+use std::{cmp::Ordering, collections::BTreeMap, fmt, str::FromStr};
 
 use anyhow::Context;
 
-use ip::{Afi, Any, Ipv4, Ipv6, Prefix, PrefixLength};
+use ip::{
+    any,
+    concrete::{self, Prefix, PrefixLength},
+    Afi, Ipv4, Ipv6,
+};
+
+use rasn::der;
+
+use rasn_cms::{SignedData, CONTENT_SIGNED_DATA};
+
+use crate::econtent::{RoaContentInfo, RouteOriginAttestation, ID_CT_ROUTE_ORIGIN_AUTHZ};
 
 #[derive(Debug, Copy, Clone)]
 enum MaxLength<A: Afi> {
@@ -28,16 +38,12 @@ impl<A: Afi> PartialOrd for MaxLength<A> {
 impl<A: Afi> Ord for MaxLength<A> {
     fn cmp(&self, other: &Self) -> Ordering {
         match (self, other) {
-            (Self::ImplicitEqual, Self::ImplicitEqual)
-            | (Self::ImplicitEqual, Self::ExplicitEqual)
-            | (Self::ExplicitEqual, Self::ImplicitEqual)
-            | (Self::ExplicitEqual, Self::ExplicitEqual) => Ordering::Equal,
-            (Self::ImplicitEqual, Self::Explicit(_)) | (Self::ExplicitEqual, Self::Explicit(_)) => {
-                Ordering::Less
-            }
-            (Self::Explicit(_), Self::ImplicitEqual) | (Self::Explicit(_), Self::ExplicitEqual) => {
-                Ordering::Greater
-            }
+            (
+                Self::ImplicitEqual | Self::ExplicitEqual,
+                Self::ImplicitEqual | Self::ExplicitEqual,
+            ) => Ordering::Equal,
+            (Self::ImplicitEqual | Self::ExplicitEqual, Self::Explicit(_)) => Ordering::Less,
+            (Self::Explicit(_), Self::ImplicitEqual | Self::ExplicitEqual) => Ordering::Greater,
             (Self::Explicit(p), Self::Explicit(q)) => p.cmp(q),
         }
     }
@@ -62,7 +68,7 @@ impl<A: Afi> InnerRoaPrefixRange<A> {
                     prefix,
                     max_length: MaxLength::ExplicitEqual,
                 }),
-                _ => Ok(Self {
+                Ordering::Greater => Ok(Self {
                     prefix,
                     max_length: MaxLength::Explicit(max_length),
                 }),
@@ -77,7 +83,7 @@ impl<A: Afi> InnerRoaPrefixRange<A> {
 }
 
 impl<A: Afi> PartialOrd for InnerRoaPrefixRange<A> {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
@@ -111,7 +117,7 @@ pub(crate) enum RoaPrefixRange {
 }
 
 impl RoaPrefixRange {
-    pub(crate) fn has_explicit_equal_max_length(&self) -> bool {
+    pub(crate) const fn has_explicit_equal_max_length(&self) -> bool {
         match self {
             Self::Ipv4(inner) => matches!(inner.max_length, MaxLength::ExplicitEqual),
             Self::Ipv6(inner) => matches!(inner.max_length, MaxLength::ExplicitEqual),
@@ -145,8 +151,8 @@ impl FromStr for RoaPrefixRange {
         } else {
             (input, None)
         };
-        match raw_prefix.parse::<Prefix<Any>>()? {
-            ip::any::Prefix::Ipv4(prefix) => {
+        match raw_prefix.parse::<any::Prefix>()? {
+            any::Prefix::Ipv4(prefix) => {
                 let max_length = raw_len
                     .map(|l| {
                         PrefixLength::<Ipv4>::from_primitive(l.parse()?)
@@ -155,7 +161,7 @@ impl FromStr for RoaPrefixRange {
                     .transpose()?;
                 InnerRoaPrefixRange::new(prefix, max_length).map(Self::Ipv4)
             }
-            ip::any::Prefix::Ipv6(prefix) => {
+            any::Prefix::Ipv6(prefix) => {
                 let max_length = raw_len
                     .map(|l| {
                         PrefixLength::<Ipv6>::from_primitive(l.parse()?)
@@ -177,9 +183,139 @@ impl fmt::Display for RoaPrefixRange {
     }
 }
 
+pub(crate) struct RoaPrefixRanges(BTreeMap<RoaPrefixRange, usize>);
+
+impl RoaPrefixRanges {
+    pub(crate) fn from_text<S, I, E>(iter: I) -> anyhow::Result<Self>
+    where
+        S: AsRef<str>,
+        I: IntoIterator<Item = Result<S, E>>,
+        E: std::error::Error + Send + Sync + 'static,
+    {
+        iter.into_iter()
+            .map(|line| line.context("failed to get input line")?.as_ref().parse())
+            .collect()
+    }
+
+    pub(crate) fn from_roa(bytes: &[u8]) -> anyhow::Result<Self> {
+        log::info!("trying to decode ROA from input bytes");
+        der::decode::<RoaContentInfo>(bytes)
+            .context("failed to decode ContentInfo")?
+            .try_into()
+    }
+}
+
+impl FromIterator<RoaPrefixRange> for RoaPrefixRanges {
+    fn from_iter<I>(iter: I) -> Self
+    where
+        I: IntoIterator<Item = RoaPrefixRange>,
+    {
+        let inner = iter
+            .into_iter()
+            .enumerate()
+            .map(|(i, item)| (item, i))
+            .collect();
+        Self(inner)
+    }
+}
+
+impl IntoIterator for RoaPrefixRanges {
+    type Item = (RoaPrefixRange, usize);
+    type IntoIter = <BTreeMap<RoaPrefixRange, usize> as IntoIterator>::IntoIter;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
+    }
+}
+
+impl TryFrom<RoaContentInfo> for RoaPrefixRanges {
+    type Error = anyhow::Error;
+
+    fn try_from(value: RoaContentInfo) -> Result<Self, Self::Error> {
+        log::info!("checking for id-ct-SignedData content-type");
+        if CONTENT_SIGNED_DATA != value.content_type {
+            let msg = "invalid OID for SignedData content";
+            log::error!("{msg}");
+            anyhow::bail!(msg);
+        }
+        log::info!("trying to decode content as SignedData");
+        let content = value.content.as_bytes();
+        let signed_data: SignedData =
+            der::decode(content).context("failed to decode CMS content")?;
+
+        let encap_content_info = signed_data.encap_content_info;
+        if ID_CT_ROUTE_ORIGIN_AUTHZ != encap_content_info.content_type {
+            anyhow::bail!("invalid OID for ROA eContent");
+        }
+        log::info!("trying to decode econtent as RouteOriginAttestation");
+        let roa_econtent: RouteOriginAttestation = encap_content_info
+            .content
+            .ok_or_else(|| anyhow::anyhow!("failed to extract eContent bytes"))
+            .and_then(|bytes| der::decode(bytes.as_ref()).context("failed to decode eContent"))?;
+
+        roa_econtent
+            .ip_addr_blocks()
+            .flat_map(|roa_ip_addr_family| {
+                let afi = roa_ip_addr_family.address_family();
+                roa_ip_addr_family
+                    .addresses()
+                    .map(move |roa_ip_addr| match &afi {
+                        Ok(concrete::Afi::Ipv4) => {
+                            Ok(RoaPrefixRange::Ipv4(InnerRoaPrefixRange::new(
+                                roa_ip_addr.address()?,
+                                roa_ip_addr.max_length::<Ipv4>()?,
+                            )?))
+                        }
+                        Ok(concrete::Afi::Ipv6) => {
+                            Ok(RoaPrefixRange::Ipv6(InnerRoaPrefixRange::new(
+                                roa_ip_addr.address()?,
+                                roa_ip_addr.max_length::<Ipv6>()?,
+                            )?))
+                        }
+                        Err(_) => anyhow::bail!("invalid IP address family indicator"),
+                    })
+            })
+            .collect::<Result<_, _>>()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn read_from_text() -> anyhow::Result<()> {
+        let input = vec![
+            Ok::<_, std::io::Error>("10.0.0.0/24"),
+            Ok("10.0.0.0/24-24"),
+            Ok("10.0.0.0/8"),
+            Ok("2001:db8:db8::/48"),
+            Ok("2001:db8::/32"),
+        ];
+        let expect = vec![
+            "10.0.0.0/8",
+            "10.0.0.0/24",
+            "2001:db8::/32",
+            "2001:db8:db8::/48",
+        ];
+        let mut errs = 0usize;
+        let output: Vec<_> = RoaPrefixRanges::from_text(input)?
+            .into_iter()
+            .enumerate()
+            .map(|(i, (item, j))| {
+                if i != j {
+                    errs += 1;
+                };
+                if item.has_explicit_equal_max_length() {
+                    errs += 1;
+                }
+                item.to_string()
+            })
+            .collect();
+        assert_eq!(output, expect);
+        assert_eq!(errs, 3);
+        Ok(())
+    }
 
     assert_relations! {
         ipv4_eq: "10.0.0.0/8" == "10.0.0.0/8-8";

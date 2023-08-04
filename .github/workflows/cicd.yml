@@ -1,0 +1,41 @@
+name: "CI/CD"
+on:
+  - push
+  - pull_request
+
+jobs:
+
+  lint:
+    name: lint
+    uses: wolcomm/.github/.github/workflows/rust-lint.yml@master
+
+  test:
+    name: test
+    strategy:
+      fail-fast: false
+      matrix:
+        toolchain: [stable, nightly]
+        args:
+          - --lib
+          - --test versions
+          - --test cli
+        include:
+          - toolchain: nightly
+            args: --doc
+    uses: wolcomm/.github/.github/workflows/rust-test.yml@master
+    with:
+      toolchain: ${{ matrix.toolchain }}
+      args: ${{ matrix.args }}
+    secrets:
+      CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+
+  publish:
+    name: publish
+    if: ${{ github.event_name == 'push' &&
+            startsWith(github.ref, 'refs/tag') }}
+    needs:
+      - lint
+      - test
+    uses: wolcomm/.github/.github/workflows/rust-publish.yml@master
+    secrets:
+      CRATES_TOKEN: ${{ secrets.CRATES_TOKEN }}

@@ -1,64 +1,58 @@
-use std::collections::BTreeMap;
+//! Support library for `roasort`.
+#![doc(html_root_url = "https://docs.rs/roasort/0.1.0")]
+// clippy lints
+#![warn(clippy::pedantic)]
+#![warn(clippy::cargo)]
+#![warn(clippy::nursery)]
+#![allow(clippy::redundant_pub_crate)]
+#![allow(clippy::multiple_crate_versions)]
+// rustc lints
+#![allow(box_pointers)]
+#![warn(absolute_paths_not_starting_with_crate)]
+#![warn(deprecated_in_future)]
+#![warn(elided_lifetimes_in_paths)]
+#![warn(explicit_outlives_requirements)]
+#![warn(keyword_idents)]
+#![warn(macro_use_extern_crate)]
+#![warn(meta_variable_misuse)]
+#![warn(missing_abi)]
+#![warn(missing_copy_implementations)]
+#![warn(missing_debug_implementations)]
+#![warn(missing_docs)]
+#![warn(non_ascii_idents)]
+#![warn(noop_method_call)]
+#![warn(pointer_structural_match)]
+#![warn(rust_2021_incompatible_closure_captures)]
+#![warn(rust_2021_incompatible_or_patterns)]
+#![warn(rust_2021_prefixes_incompatible_syntax)]
+#![warn(rust_2021_prelude_collisions)]
+#![warn(single_use_lifetimes)]
+#![warn(trivial_casts)]
+#![warn(trivial_numeric_casts)]
+#![warn(unreachable_pub)]
+#![warn(unsafe_code)]
+#![warn(unsafe_op_in_unsafe_fn)]
+#![warn(unstable_features)]
+#![warn(unused_crate_dependencies)]
+#![warn(unused_extern_crates)]
+#![warn(unused_import_braces)]
+#![warn(unused_lifetimes)]
+#![warn(unused_qualifications)]
+#![warn(unused_results)]
+#![warn(variant_size_differences)]
+// docs.rs build config
+#![cfg_attr(docsrs, feature(doc_auto_cfg))]
 
-use anyhow::Context;
-
-pub mod cli;
-
+mod cli;
+mod econtent;
 mod ir;
-use ir::RoaPrefixRange;
 
-fn collect<S, I, E>(iter: I) -> anyhow::Result<BTreeMap<RoaPrefixRange, usize>>
-where
-    S: AsRef<str>,
-    I: IntoIterator<Item = Result<S, E>>,
-    E: std::error::Error + Send + Sync + 'static,
-{
-    iter.into_iter()
-        .enumerate()
-        .map(|(i, line)| {
-            Ok((
-                line.context("failed to get input line")?.as_ref().parse()?,
-                i,
-            ))
-        })
-        .collect()
-}
+pub use cli::main;
 
+// silence unused dev-dependency warnings
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn ordering() -> anyhow::Result<()> {
-        let input = vec![
-            Ok::<_, std::io::Error>("10.0.0.0/24"),
-            Ok("10.0.0.0/24-24"),
-            Ok("10.0.0.0/8"),
-            Ok("2001:db8:db8::/48"),
-            Ok("2001:db8::/32"),
-        ];
-        let expect = vec![
-            "10.0.0.0/8",
-            "10.0.0.0/24",
-            "2001:db8::/32",
-            "2001:db8:db8::/48",
-        ];
-        let mut errs = 0usize;
-        let output: Vec<_> = collect(input)?
-            .into_iter()
-            .enumerate()
-            .map(|(i, (item, j))| {
-                if i != j {
-                    errs += 1;
-                };
-                if item.has_explicit_equal_max_length() {
-                    errs += 1;
-                }
-                item.to_string()
-            })
-            .collect();
-        assert_eq!(output, expect);
-        assert_eq!(errs, 3);
-        Ok(())
-    }
+mod deps {
+    use assert_cmd as _;
+    use predicates as _;
+    use version_sync as _;
 }

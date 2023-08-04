@@ -1,3 +1,3 @@
 fn main() -> anyhow::Result<()> {
-    roasort::cli::main()
+    roasort::main()
 }

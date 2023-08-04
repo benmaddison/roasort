@@ -2,8 +2,29 @@
 name = "roasort"
 version = "0.1.0"
 edition = "2021"
+authors = ["Ben Maddison <benm@workonline.africa>"]
+description = "A sample application demonstrating the canonical representation of ROA eConent data"
+license = "MIT"
+repository = "https://github.com/benmaddison/roasort"
+readme = "README.md"
+keywords = ["rpki", "roa"]
+categories = ["network-programming", "command-line-utilities"]
 
 [dependencies]
 anyhow = "^1.0"
 clap = { version = "^4.0", features = ["derive"] }
-generic-ip = "0.1.0-rc.2"
+clap-verbosity-flag = "^2.0"
+generic-ip = "0.1.0-rc.3"
+log = "^0.4"
+num-traits = "^0.2"
+# TODO: pending https://github.com/XAMPPRocky/rasn/issues/134
+# rasn = "^0.8"
+# rasn-cms = "^0.8"
+rasn = { git = "https://github.com/benmaddison/rasn.git", branch = "bit-string-length" }
+rasn-cms = { git = "https://github.com/benmaddison/rasn.git", branch = "bit-string-length" }
+simple_logger = { version = "^4.0", features = ["stderr"] }
+
+[dev-dependencies]
+assert_cmd = "^2.0"
+predicates = "^3.0"
+version-sync = "^0.9"
